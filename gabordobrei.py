@@ -1,54 +1,105 @@
 #!/usr/bin/python
-
-from mininet.topo import Topo
-from mininet.net import Mininet
-from mininet.util import dumpNodeConnections
-from mininet.log import setLogLevel
+# coding=utf-8
 
 import sys
 import os
 
-class POXBridge( Controller ):
-	"Custom Controller class to invoke POX forwarding.l2_learning"
+from mininet.topo import Topo
+from mininet.net import Mininet
+from mininet.util import dumpNodeConnections
+from mininet.log import lg, info
+from mininet.node import Controller
+from random import randint
+from array import array
+import re
+import sqlite3
+
+
+class ShortestWidestProxyController( Controller ):
 	def start( self ):
-		"Start POX learning switch"
 		self.pox = '%s/pox/pox.py' % os.environ[ 'HOME' ]
+		#self.cmd( self.pox, 'policy_routing.shortest_widest &' )
 		self.cmd( self.pox, 'forwarding.l2_learning &' )
 	def stop( self ):
-		"Stop POX"
 		self.cmd( 'kill %' + self.pox )
 
-controllers = { 'poxbridge': POXBridge }
+controllers = { 'shortestwidest': ShortestWidestProxyController }
 
-class SingleSwitchTopo(Topo):
-	"Single switch connected to n hosts."
-	def __init__(self, n=2, **opts):
+
+class generateTopoFromArrays(Topo):
+	def __init__(self, hosts, switches, links, **opts):
 		# Initialize topology and default options
 		Topo.__init__(self, **opts)
-		switch = self.addSwitch('s1')
-		# Python's range(N) generates 0..N-1
-		for h in range(n):
-			host = self.addHost('h%s' % (h + 1))
-			self.addLink(host, switch)
+
+		for s in switches:
+			self.addSwitch(s)
+
+		for h in hosts:
+			self.addHost(h)
+		
+		for l in links:
+			self.addLink(l[0], l[1])
+
+def setupTopoLinks( topo, links ):
+	for l in links:
+		topo.setlinkInfo(l[0], l[1], l[2])
 
 
-def simpleTest(size):
-	"Create and test a simple network"
-	topo = SingleSwitchTopo(n=size)
-	net = Mininet(topo)
+def createHost(i): return 'h%s' % (i+1)
+def createSwitch(i): return 's%s' % (i+1)
+def createRandomLink(h, switches): return (h, switches[randint(0, len(switches)-1)], (randint(1, 5)*10))
+
+def createNetworkAndSaveToDB(n, conn):
+	
+	c = conn.cursor()
+	c.execute('''DROP TABLE IF EXISTS size''')
+	c.execute('''CREATE TABLE IF NOT EXISTS size (s integer, name text)''')
+	c.execute("INSERT INTO size VALUES (?, 'switch')", [n])
+	c.execute("INSERT INTO size VALUES (?, 'host')", [3*n])
+	
+	c.execute('''DROP TABLE IF EXISTS links''')
+	c.execute('''CREATE TABLE IF NOT EXISTS links (left_id text, right_id text, bw integer)''')
+
+	switches = map(createSwitch, range(n))
+	hosts = map(createHost, range(n*3))
+	links = []
+
+	for i in switches:
+		for j in range(i):
+			links.append((switches[i], switches[j], 80+randint(0,4)*10))
+	
+	for h in hosts:
+		links.append(createRandomLink(h, switches))
+	
+	for l in links:
+		c.execute("INSERT INTO links VALUES (?, ?, ?)", [l[0], l[1], l[2]])
+
+	conn.commit()
+
+	conn.close()
+	return switches, hosts, links
+
+def simpleTest(n, k = 0):
+
+	switches, hosts, links = createNetworkAndSaveToDB(n = n, conn = sqlite3.connect('network.db'))
+
+	topo = generateTopoFromArrays(hosts = hosts, switches = switches, links = links)
+	net = Mininet( topo=topo, controller=ShortestWidestProxyController, cleanup=True)
+
 	net.start()
-	""".
-	print "Dumping host connections"
-	dumpNodeConnections(net.hosts)
-	print "Testing network connectivity"
+	#dumpNodeConnections(net.hosts)
+	
+	setupTopoLinks( topo, links )
+
+	for l in links: print l[0], "<--", topo.linkInfo(l[0], l[1]) , "-->", l[1]
+	#real_hosts = net.hosts
+	#for h in real_hosts: print h.name, ": ", h.IP()
+	#for sw in net.switches: print sw.name, ": ", sw.IP()
+		
 	net.pingAll()
-	"""
-
-
 
 	net.stop()
 
 if __name__ == '__main__':
-	# Tell mininet to print useful information
-	setLogLevel('info')
+	lg.setLogLevel('info')
 	simpleTest(int(sys.argv[1]))
